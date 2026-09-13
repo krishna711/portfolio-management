@@ -1,0 +1,16 @@
+# Node
+node_modules/
+client/node_modules/
+client/client/node_modules/
+client/dist/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local databases
+server/portfolio.db
+server/portfolio-live.db
+
+# Editor/tooling
+.windsurf/

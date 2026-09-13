@@ -1,0 +1,76 @@
+
+Local Run: 
+uvicorn app.main:app --reload --port 8000 --app-dir server
+frontend:
+cd client
+npm install
+npm run dev
+
+/var/log/portfolio-error.log
+
+Build a portfolio management system
+
+Users
+  Basic User field for authentication
+
+Accounts
+  Id
+  Name
+  Broker -> Zerodha, Upstox, Dhan, Fyers, IIFL
+  ApiKey
+  ApiSecret
+  AccessToken
+
+Holdings
+  Id
+  AccountId
+  Symbol
+  Quantity
+  AveragePrice
+  TotalCost
+
+Transactions
+  Id
+  HoldingId
+  TransactionType -> Buy, Sell
+  Quantity
+  Price
+  Total -> Quantity * Price
+
+Users can have multiple accounts
+Accounts can have multiple holdings
+Holdings can have multiple transactions
+
+I need to build a portfolio management system
+
+whenever i purchase a stock, i need to create a transaction, and update the holding, holding should automaically adjust with the average latest price and total cost. I can buy in chunks and also sell in chunks. Holding should be updated accordingly and total profit should be calculated.
+
+Latest prices should be from the yahoo finance to calculate daily change in portfolio value. 
+
+A beautiful UI is required to display the portfolio value, total profit, and daily change in portfolio value.
+
+Transactions should have option to select tranaction date, if not selected then it should be current date. It will be used to calculate holding time of stock. 
+
+Dashboard should have the following features:
+  Portfolio Value
+  Total Profit
+  Daily Change
+  EquityCurve
+  Account Wise Portfolio
+  Account Wise Profit
+
+cd htdocs/p.yotek.net/client
+
+
+momentum-backend.service
+semi-multi.service
+semi-multi.timer
+semi-ag.service
+semi-ag.timer
+stream-api.service
+stream-api.timer
+tasks-yotek.service
+websocketapp.service
+portfolio-backend.service
+backtest.service
+openalgorun.service
