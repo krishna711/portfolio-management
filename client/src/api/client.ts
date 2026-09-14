@@ -25,4 +25,26 @@ api.interceptors.request.use((config) => {
   return config
 })
 
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const status = err?.response?.status
+    if (status === 401) {
+      try {
+        localStorage.removeItem('token')
+        localStorage.removeItem('must_change_password')
+        localStorage.removeItem('is_admin')
+      } catch {}
+
+      const path = typeof window !== 'undefined' ? window.location.pathname : ''
+      if (path !== '/login') {
+        try {
+          window.location.assign('/login')
+        } catch {}
+      }
+    }
+    return Promise.reject(err)
+  },
+)
+
 export default api
