@@ -58,6 +58,22 @@ type IpoRow = {
   listing_on: 'nse' | 'bse' | 'both' | null
 }
 
+type IpoMetricsAlerts = {
+  as_of: string | null
+  st_same_5d: { symbol: string; name: string; st_up: boolean; dates: string[]; is_new?: boolean }[]
+  above_ema: {
+    date: string | null
+    all: { symbol: string; name: string; is_new?: boolean }[]
+    e21: { symbol: string; name: string }[]
+    e50: { symbol: string; name: string }[]
+    e100: { symbol: string; name: string }[]
+  }
+  score_upgrades: {
+    date: string | null
+    items: { symbol: string; name: string; from_score: number; to_score: number; prev_date: string; cur_date: string }[]
+  }
+}
+
 function fmtNum(v: number | null | undefined, digits: number = 2) {
   if (v === null || v === undefined) return '-'
   if (typeof v !== 'number' || Number.isNaN(v)) return '-'
@@ -85,7 +101,8 @@ export default function IpoTracker() {
   const [formOpen, setFormOpen] = useState(false)
 
   const [filterAgeLt1y, setFilterAgeLt1y] = useState(false)
-  const [filterYear, setFilterYear] = useState<string>('')
+  const [filterListingStatus, setFilterListingStatus] = useState<'listed' | 'unlisted' | 'all'>('listed')
+  const [filterYear, setFilterYear] = useState<number | null>(null)
   const [filterGainMin, setFilterGainMin] = useState('')
   const [filterGainMax, setFilterGainMax] = useState('')
   const [filterAbove, setFilterAbove] = useState<'any' | 'listing' | 'ipo'>('any')
@@ -102,8 +119,13 @@ export default function IpoTracker() {
   const [priceUpdating, setPriceUpdating] = useState(false)
   const [metricsRunning, setMetricsRunning] = useState(false)
 
+  const [alerts, setAlerts] = useState<IpoMetricsAlerts | null>(null)
+  const [alertsLoading, setAlertsLoading] = useState(false)
+  const [alertsError, setAlertsError] = useState('')
+
   const [name, setName] = useState('')
   const [symbol, setSymbol] = useState('')
+  const [bseSymbol, setBseSymbol] = useState('')
   const [board, setBoard] = useState<'mainboard' | 'sme'>('mainboard')
   const [ipoPrice, setIpoPrice] = useState<string>('')
   const [listingPrice, setListingPrice] = useState<string>('')
@@ -118,6 +140,20 @@ export default function IpoTracker() {
 
   const effectiveCols = useMemo(() => allColumns.filter(c => visibleCols.has(c.key)), [allColumns, visibleCols])
   const showActions = isAdmin && visibleCols.has('actions')
+
+  const rowBySymbol = useMemo(() => {
+    const m = new Map<string, IpoRow>()
+    for (const r of rows) {
+      const sym = (r.symbol || '').trim().toUpperCase()
+      if (sym) m.set(sym, r)
+    }
+    return m
+  }, [rows])
+
+  const scoreForSymbol = (sym: string) => {
+    const r = rowBySymbol.get((sym || '').trim().toUpperCase())
+    return r ? scoreFor(r).score : null
+  }
 
   const loadPrefs = async () => {
     try {
@@ -166,15 +202,29 @@ export default function IpoTracker() {
     }
   }
 
-  const [metricsInsights, setMetricsInsights] = useState<any | null>(null)
+  const loadAlerts = async () => {
+    if (!isAdmin) return
+    setAlertsLoading(true)
+    setAlertsError('')
+    try {
+      const res = await api.get('/ipos/metrics/alerts')
+      setAlerts(res?.data || null)
+    } catch (e: any) {
+      console.error('Failed to load IPO metrics alerts', e)
+      setAlerts(null)
+      setAlertsError('Failed to load metrics alerts')
+    } finally {
+      setAlertsLoading(false)
+    }
+  }
 
   const runMetricsNow = async () => {
     if (!isAdmin) return
     setMetricsRunning(true)
     setError('')
     try {
-      const res = await api.post('/ipos/metrics/run')
-      setMetricsInsights(res?.data?.insights || null)
+      await api.post('/ipos/metrics/run')
+      await loadAlerts()
       await load()
     } catch (e: any) {
       const msg = e?.response?.data?.detail || 'Failed to run metrics'
@@ -206,6 +256,7 @@ export default function IpoTracker() {
   }
 
   useEffect(() => { void loadPrefs(); void load() }, [])
+  useEffect(() => { if (isAdmin) void loadAlerts() }, [isAdmin])
 
   const yearOptions = useMemo(() => {
     const cur = new Date().getFullYear()
@@ -228,6 +279,7 @@ export default function IpoTracker() {
     setEditing(r)
     setName(r.name || '')
     setSymbol(r.symbol || '')
+    setBseSymbol(r.bse_symbol || '')
     setBoard(r.board || 'mainboard')
     setIpoPrice(r.ipo_price === null ? '' : String(r.ipo_price))
     setListingPrice(r.listing_price === null ? '' : String(r.listing_price))
@@ -246,6 +298,7 @@ export default function IpoTracker() {
     setFormOpen(false)
     setName('')
     setSymbol('')
+    setBseSymbol('')
     setBoard('mainboard')
     setIpoPrice('')
     setListingPrice('')
@@ -277,6 +330,7 @@ export default function IpoTracker() {
   const payload = () => ({
     name: (name || '').trim(),
     symbol: (symbol || '').trim().toUpperCase(),
+    bse_symbol: (bseSymbol || '').trim() || null,
     board,
     ipo_price: parseNum(ipoPrice),
     listing_price: parseNum(listingPrice),
@@ -350,7 +404,25 @@ export default function IpoTracker() {
       return dt.getFullYear()
     }
 
+    const todayLocal = (() => {
+      const d = new Date()
+      const y = d.getFullYear()
+      const m = String(d.getMonth() + 1).padStart(2, '0')
+      const dd = String(d.getDate()).padStart(2, '0')
+      return `${y}-${m}-${dd}`
+    })()
+
+    const isListed = (r: IpoRow) => {
+      const ld = r.listing_date
+      if (!ld) return false
+      // listing_date is YYYY-MM-DD
+      return ld <= todayLocal
+    }
+
     return rows.filter(r => {
+      if (filterListingStatus === 'listed' && !isListed(r)) return false
+      if (filterListingStatus === 'unlisted' && isListed(r)) return false
+
       const c = (r.color || 'none') as any
       if (filterColor !== 'any') {
         if (filterColor === 'none') {
@@ -365,10 +437,10 @@ export default function IpoTracker() {
         if (m >= 12) return false
       }
 
-      if (filterYear) {
+      if (filterYear !== null) {
         const y = listingYear(r.listing_date)
         if (y === null) return false
-        if (String(y) !== String(filterYear)) return false
+        if (y !== filterYear) return false
       }
 
       if (gainMin !== null) {
@@ -414,11 +486,12 @@ export default function IpoTracker() {
 
       return true
     })
-  }, [rows, filterAgeLt1y, filterYear, filterGainMin, filterGainMax, filterAbove, filterQibMin, filterQibMax, filterSupertrendUp, filterAboveEma21, filterAboveEma50, filterAboveEma100, filterScoreMin, filterScoreMax, filterColor])
+  }, [rows, filterAgeLt1y, filterListingStatus, filterYear, filterGainMin, filterGainMax, filterAbove, filterQibMin, filterQibMax, filterSupertrendUp, filterAboveEma21, filterAboveEma50, filterAboveEma100, filterScoreMin, filterScoreMax, filterColor])
 
   const clearFilters = () => {
     setFilterAgeLt1y(false)
-    setFilterYear('')
+    setFilterListingStatus('listed')
+    setFilterYear(null)
     setFilterGainMin('')
     setFilterGainMax('')
     setFilterAbove('any')
@@ -439,6 +512,7 @@ export default function IpoTracker() {
     if (!formOpen) {
       setName('')
       setSymbol('')
+      setBseSymbol('')
       setBoard('mainboard')
       setIpoPrice('')
       setListingPrice('')
@@ -454,9 +528,9 @@ export default function IpoTracker() {
   }
 
   const dot = (v: boolean | null | undefined) => {
-    if (v === true) return <span className="inline-block h-2 w-2 rounded-full bg-green-500" />
-    if (v === false) return <span className="inline-block h-2 w-2 rounded-full bg-gray-400" />
-    return <span className="inline-block h-2 w-2 rounded-full bg-gray-300" />
+    if (v === true) return <span className="inline-block h-2 w-2 rounded-full bg-emerald-500 dark:bg-emerald-400" />
+    if (v === false) return <span className="inline-block h-2 w-2 rounded-full bg-gray-400 dark:bg-gray-600" />
+    return <span className="inline-block h-2 w-2 rounded-full bg-gray-300 dark:bg-gray-700" />
   }
 
   function scoreFor(r: IpoRow) {
@@ -471,9 +545,9 @@ export default function IpoTracker() {
 
     const score = (st ? 1 : 0) + (e21 ? 1 : 0) + (e50 ? 1 : 0) + (e100 ? 1 : 0) + (aboveListing ? 1 : 0) + (aboveIpo ? 1 : 0)
 
-    let cls = 'text-red-600'
-    if (score >= 5) cls = 'text-green-600'
-    else if (score >= 3) cls = 'text-orange-600'
+    let cls = 'text-red-600 dark:text-red-400'
+    if (score >= 5) cls = 'text-green-600 dark:text-green-400'
+    else if (score >= 3) cls = 'text-orange-600 dark:text-orange-400'
 
     return { score, cls }
   }
@@ -491,13 +565,13 @@ export default function IpoTracker() {
   const rowBgClass = (color: any) => {
     switch (color) {
       case 'green':
-        return 'bg-green-50/70 dark:bg-emerald-400/10'
+        return 'bg-green-50 dark:bg-emerald-500/10'
       case 'orange':
-        return 'bg-orange-50/70 dark:bg-orange-400/10'
+        return 'bg-orange-50 dark:bg-orange-500/10'
       case 'yellow':
-        return 'bg-yellow-50/70 dark:bg-yellow-300/10'
+        return 'bg-yellow-50 dark:bg-yellow-500/10'
       case 'red':
-        return 'bg-red-50/70 dark:bg-red-400/10'
+        return 'bg-red-50 dark:bg-red-500/10'
       default:
         return ''
     }
@@ -509,15 +583,19 @@ export default function IpoTracker() {
       return (
         <div className="flex items-center gap-2">
           <select
-            className="border dark:border-gray-700 dark:bg-gray-900 rounded px-2 py-1 text-xs"
+            className="border dark:border-gray-700 dark:bg-gray-900 rounded px-2 py-1 text-xs dark:text-gray-100 w-12"
+            style={{
+              color: c === 'green' ? '#10b981' : c === 'orange' ? '#f97316' : c === 'yellow' ? '#eab308' : c === 'red' ? '#ef4444' : undefined,
+            }}
             value={c}
             onChange={(e) => void setRowColor(r.id, e.target.value as any)}
+            title={c}
           >
-            <option value="none">None</option>
-            <option value="green">Green</option>
-            <option value="orange">Orange</option>
-            <option value="yellow">Yellow</option>
-            <option value="red">Red</option>
+            <option value="none">-</option>
+            <option value="green" style={{ color: '#10b981' }}>●</option>
+            <option value="orange" style={{ color: '#f97316' }}>●</option>
+            <option value="yellow" style={{ color: '#eab308' }}>●</option>
+            <option value="red" style={{ color: '#ef4444' }}>●</option>
           </select>
           <span>{r.name}</span>
         </div>
@@ -590,7 +668,13 @@ export default function IpoTracker() {
             >
               {priceUpdating ? 'Updating...' : 'Update Prices'}
             </button>
-            <button className="text-sm border dark:border-gray-700 dark:text-gray-100 px-3 py-1.5 rounded" onClick={() => void load()}>
+            <button
+              className="text-sm border dark:border-gray-700 dark:text-gray-100 px-3 py-1.5 rounded"
+              onClick={() => {
+                void load()
+                if (isAdmin) void loadAlerts()
+              }}
+            >
               Refresh
             </button>
           </div>
@@ -610,68 +694,173 @@ export default function IpoTracker() {
           </div>
         )}
 
-        {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
+        {isAdmin && (
+          <div className="mt-4">
+            <div className="text-sm font-semibold mb-2 dark:text-gray-100">Metrics Alerts</div>
+            <div className="grid grid-cols-1 gap-3 items-start">
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">ST same (last 5 days) · {alerts?.st_same_5d?.length || 0} matches</div>
+                {alertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {(() => {
+                        const upSyms = (alerts?.st_same_5d || [])
+                          .filter(x => x.st_up)
+                          .slice(0, 120)
+                          .map(x => String(x.symbol || '').trim().toUpperCase())
+                          .filter(Boolean)
+                        if (!upSyms.length) return <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+
+                        const emaSet = new Set(
+                          (alerts?.above_ema?.all || [])
+                            .map(x => String(x.symbol || '').trim().toUpperCase())
+                            .filter(Boolean)
+                        )
+
+                        const newSet = new Set(
+                          (alerts?.st_same_5d || [])
+                            .filter(x => x.st_up && x.is_new)
+                            .map(x => String(x.symbol || '').trim().toUpperCase())
+                            .filter(Boolean)
+                        )
+
+                        const sorted = [...upSyms].sort((a, b) => {
+                          const sa = scoreForSymbol(a)
+                          const sb = scoreForSymbol(b)
+                          const da = sa === null ? -1 : sa
+                          const db = sb === null ? -1 : sb
+                          if (db !== da) return db - da
+                          return a.localeCompare(b)
+                        })
+
+                        return (
+                          <div className="text-xs font-mono whitespace-normal break-words text-emerald-700 dark:text-emerald-300">
+                            {sorted.map((sym, i) => {
+                              const sc = scoreForSymbol(sym)
+                              const base = sc === null ? sym : `${sym}(${sc})`
+                              const txt = emaSet.has(sym) ? `${base}✓` : base
+                              const isNew = newSet.has(sym)
+                              return (
+                                <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
+                                  {i ? ', ' : ''}{txt}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Close above EMAs (All 3) · All 3: {alerts?.above_ema?.all?.length || 0} | E21: {alerts?.above_ema?.e21?.length || 0} | E50: {alerts?.above_ema?.e50?.length || 0} | E100: {alerts?.above_ema?.e100?.length || 0}</div>
+                {alertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {!!alerts?.above_ema?.all?.length ? (
+                        <div className="text-xs font-mono whitespace-normal break-words text-gray-900 dark:text-gray-100">
+                          {(() => {
+                            const stSet = new Set(
+                              (alerts?.st_same_5d || [])
+                                .filter(x => x.st_up)
+                                .map(x => String(x.symbol || '').trim().toUpperCase())
+                                .filter(Boolean)
+                            )
+
+                            const newSet = new Set(
+                              (alerts?.above_ema?.all || [])
+                                .filter(x => x.is_new)
+                                .map(x => String(x.symbol || '').trim().toUpperCase())
+                                .filter(Boolean)
+                            )
+
+                            const syms = (alerts?.above_ema?.all || [])
+                              .slice(0, 200)
+                              .map(x => String(x.symbol || '').trim().toUpperCase())
+                              .filter(Boolean)
+
+                            const sorted = syms.sort((a, b) => {
+                              const sa = scoreForSymbol(a)
+                              const sb = scoreForSymbol(b)
+                              const da = sa === null ? -1 : sa
+                              const db = sb === null ? -1 : sb
+                              if (db !== da) return db - da
+                              return a.localeCompare(b)
+                            })
+
+                            return (
+                              <>
+                                {sorted.map((sym, i) => {
+                                  const sc = scoreForSymbol(sym)
+                                  const base = sc === null ? sym : `${sym}(${sc})`
+                                  const txt = stSet.has(sym) ? `${base}✓` : base
+                                  const isNew = newSet.has(sym)
+                                  return (
+                                    <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
+                                      {i ? ', ' : ''}{txt}
+                                    </span>
+                                  )
+                                })}
+                              </>
+                            )
+                          })()}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Score upgrades · {alerts?.score_upgrades?.items?.length || 0}</div>
+                {alertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {!!alerts?.score_upgrades?.items?.length ? (
+                        <div className="text-xs font-mono whitespace-normal break-words text-gray-900 dark:text-gray-100">
+                          {(alerts?.score_upgrades?.items || [])
+                            .slice(0, 120)
+                            .map(x => {
+                              const sym = String(x.symbol || '').trim().toUpperCase()
+                              const sc = scoreForSymbol(sym)
+                              const head = sc === null ? sym : `${sym}(${sc})`
+                              return { sym, sc, head, txt: `${head} ${x.from_score}→${x.to_score}` }
+                            })
+                            .sort((a, b) => {
+                              const da = a.sc === null ? -1 : a.sc
+                              const db = b.sc === null ? -1 : b.sc
+                              if (db !== da) return db - da
+                              return a.sym.localeCompare(b.sym)
+                            })
+                            .map(x => x.txt)
+                            .join(', ')}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {alertsError && <div className="mt-2 text-sm text-red-600 dark:text-red-400">{alertsError}</div>}
+          </div>
+        )}
+
+        {error && <div className="mt-3 text-sm text-red-600 dark:text-red-400">{error}</div>}
         {loading && <div className="mt-3 text-sm text-gray-600 dark:text-gray-400">Loading...</div>}
       </div>
-
-      {!!metricsInsights && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-            <div className="text-sm font-semibold">ST stable (last 5)</div>
-            <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-              Date: {metricsInsights?.for_date}
-            </div>
-            <div className="mt-2 text-sm">
-              {(metricsInsights?.stable_st_5 || []).slice(0, 20).map((x: any) => (
-                <div key={x.symbol} className="flex items-center justify-between border-b dark:border-gray-700 py-1 last:border-b-0">
-                  <span>{x.symbol}</span>
-                  <span className={x.st ? 'text-green-600' : 'text-gray-500'}>{x.st ? 'UP' : 'DOWN'}</span>
-                </div>
-              ))}
-              {(!metricsInsights?.stable_st_5 || metricsInsights.stable_st_5.length === 0) && (
-                <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-            <div className="text-sm font-semibold">Close above E21/E50/E100</div>
-            <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-              Date: {metricsInsights?.for_date}
-            </div>
-            <div className="mt-2 text-sm">
-              {(metricsInsights?.above_all_emas || []).slice(0, 20).map((x: any) => (
-                <div key={x.symbol} className="border-b dark:border-gray-700 py-1 last:border-b-0">{x.symbol}</div>
-              ))}
-              {(!metricsInsights?.above_all_emas || metricsInsights.above_all_emas.length === 0) && (
-                <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
-              )}
-            </div>
-          </div>
-
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-            <div className="text-sm font-semibold">Score upgrades</div>
-            <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-              {metricsInsights?.prev_date ? (
-                <>From {metricsInsights.prev_date} to {metricsInsights.for_date}</>
-              ) : (
-                <>Date: {metricsInsights?.for_date}</>
-              )}
-            </div>
-            <div className="mt-2 text-sm">
-              {(metricsInsights?.score_upgrades || []).slice(0, 20).map((x: any) => (
-                <div key={x.symbol} className="flex items-center justify-between border-b dark:border-gray-700 py-1 last:border-b-0">
-                  <span>{x.symbol}</span>
-                  <span className="text-green-600">{x.from}→{x.to}</span>
-                </div>
-              ))}
-              {(!metricsInsights?.score_upgrades || metricsInsights.score_upgrades.length === 0) && (
-                <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
 
       {isAdmin && formOpen && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
@@ -684,6 +873,7 @@ export default function IpoTracker() {
           <form onSubmit={onSubmit} className="grid grid-cols-1 md:grid-cols-6 gap-3">
             <input className="border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2 md:col-span-2" placeholder="Name" value={name} onChange={e => setName(e.target.value)} required />
             <input className="border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2" placeholder="Symbol" value={symbol} onChange={e => setSymbol(e.target.value.toUpperCase())} required />
+            <input className="border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2" placeholder="BSE Code" value={bseSymbol} onChange={e => setBseSymbol(e.target.value)} />
             <select className="border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2" value={board} onChange={e => setBoard(e.target.value as any)}>
               <option value="mainboard">Mainboard</option>
               <option value="sme">SME</option>
@@ -732,15 +922,31 @@ export default function IpoTracker() {
           </label>
 
           <div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 mb-1">Status</div>
+            <select
+              className="w-full border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2 text-sm"
+              value={filterListingStatus}
+              onChange={(e) => setFilterListingStatus(e.target.value as any)}
+            >
+              <option value="listed">Listed</option>
+              <option value="unlisted">Unlisted</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+
+          <div>
             <div className="text-xs text-gray-600 dark:text-gray-400 mb-1">Year (listing)</div>
             <select
               className="w-full border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2 text-sm"
-              value={filterYear}
-              onChange={(e) => setFilterYear(e.target.value)}
+              value={filterYear === null ? '' : String(filterYear)}
+              onChange={(e) => {
+                const v = (e.target.value || '').trim()
+                setFilterYear(v ? Number(v) : null)
+              }}
             >
               <option value="">Any</option>
               {yearOptions.map(y => (
-                <option key={y} value={String(y)}>{y}</option>
+                <option key={y} value={y}>{y}</option>
               ))}
             </select>
           </div>
@@ -795,7 +1001,7 @@ export default function IpoTracker() {
 
           <label className="flex items-center gap-2 text-sm md:col-span-2">
             <input type="checkbox" checked={filterSupertrendUp} onChange={e => setFilterSupertrendUp(e.target.checked)} />
-            <span>Supertrend (10,3) Positive</span>
+            <span>Supertrend (8,3.2) Positive</span>
           </label>
 
           <label className="flex items-center gap-2 text-sm">

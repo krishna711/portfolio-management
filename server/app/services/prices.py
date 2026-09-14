@@ -575,7 +575,7 @@ def atr_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
 
 
-def supertrend_direction(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> Optional[bool]:
+def supertrend_direction_series(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> Optional[pd.Series]:
     if df is None or df.empty:
         return None
     if not all(c in df.columns for c in ('high', 'low', 'close')):
@@ -590,7 +590,6 @@ def supertrend_direction(df: pd.DataFrame, period: int = 10, multiplier: float =
     if atr_valid.empty:
         return None
 
-    # Start from the first bar where ATR is available to avoid NaN-band issues
     start_idx = atr_valid.index[0]
     df3 = df2.loc[start_idx:].copy()
     atr3 = atr.loc[df3.index]
@@ -630,7 +629,6 @@ def supertrend_direction(df: pd.DataFrame, period: int = 10, multiplier: float =
     st = pd.Series(index=df3.index, dtype='float64')
     direction = pd.Series(index=df3.index, dtype='int64')
 
-    # Initialize using first computed bands
     if float(close.iloc[0]) <= float(final_upper.iloc[0]):
         st.iloc[0] = float(final_upper.iloc[0])
         direction.iloc[0] = -1
@@ -661,4 +659,14 @@ def supertrend_direction(df: pd.DataFrame, period: int = 10, multiplier: float =
                 st.iloc[i] = fu
                 direction.iloc[i] = -1
 
-    return bool(int(direction.iloc[-1]) == 1)
+    return (direction == 1).astype(bool)
+
+
+def supertrend_direction(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> Optional[bool]:
+    s = supertrend_direction_series(df, period=period, multiplier=multiplier)
+    if s is None or s.empty:
+        return None
+    try:
+        return bool(s.iloc[-1])
+    except Exception:
+        return None
