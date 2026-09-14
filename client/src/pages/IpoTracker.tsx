@@ -85,7 +85,7 @@ export default function IpoTracker() {
   const [formOpen, setFormOpen] = useState(false)
 
   const [filterAgeLt1y, setFilterAgeLt1y] = useState(false)
-  const [filterYears, setFilterYears] = useState<number[]>([])
+  const [filterYear, setFilterYear] = useState<string>('')
   const [filterGainMin, setFilterGainMin] = useState('')
   const [filterGainMax, setFilterGainMax] = useState('')
   const [filterAbove, setFilterAbove] = useState<'any' | 'listing' | 'ipo'>('any')
@@ -166,12 +166,15 @@ export default function IpoTracker() {
     }
   }
 
+  const [metricsInsights, setMetricsInsights] = useState<any | null>(null)
+
   const runMetricsNow = async () => {
     if (!isAdmin) return
     setMetricsRunning(true)
     setError('')
     try {
-      await api.post('/ipos/metrics/run')
+      const res = await api.post('/ipos/metrics/run')
+      setMetricsInsights(res?.data?.insights || null)
       await load()
     } catch (e: any) {
       const msg = e?.response?.data?.detail || 'Failed to run metrics'
@@ -362,10 +365,10 @@ export default function IpoTracker() {
         if (m >= 12) return false
       }
 
-      if (filterYears.length) {
+      if (filterYear) {
         const y = listingYear(r.listing_date)
         if (y === null) return false
-        if (!filterYears.includes(y)) return false
+        if (String(y) !== String(filterYear)) return false
       }
 
       if (gainMin !== null) {
@@ -411,11 +414,11 @@ export default function IpoTracker() {
 
       return true
     })
-  }, [rows, filterAgeLt1y, filterYears, filterGainMin, filterGainMax, filterAbove, filterQibMin, filterQibMax, filterSupertrendUp, filterAboveEma21, filterAboveEma50, filterAboveEma100, filterScoreMin, filterScoreMax, filterColor])
+  }, [rows, filterAgeLt1y, filterYear, filterGainMin, filterGainMax, filterAbove, filterQibMin, filterQibMax, filterSupertrendUp, filterAboveEma21, filterAboveEma50, filterAboveEma100, filterScoreMin, filterScoreMax, filterColor])
 
   const clearFilters = () => {
     setFilterAgeLt1y(false)
-    setFilterYears([])
+    setFilterYear('')
     setFilterGainMin('')
     setFilterGainMax('')
     setFilterAbove('any')
@@ -488,13 +491,13 @@ export default function IpoTracker() {
   const rowBgClass = (color: any) => {
     switch (color) {
       case 'green':
-        return 'bg-green-50 dark:bg-green-900/20'
+        return 'bg-green-50/70 dark:bg-emerald-400/10'
       case 'orange':
-        return 'bg-orange-50 dark:bg-orange-900/20'
+        return 'bg-orange-50/70 dark:bg-orange-400/10'
       case 'yellow':
-        return 'bg-yellow-50 dark:bg-yellow-900/20'
+        return 'bg-yellow-50/70 dark:bg-yellow-300/10'
       case 'red':
-        return 'bg-red-50 dark:bg-red-900/20'
+        return 'bg-red-50/70 dark:bg-red-400/10'
       default:
         return ''
     }
@@ -611,6 +614,65 @@ export default function IpoTracker() {
         {loading && <div className="mt-3 text-sm text-gray-600 dark:text-gray-400">Loading...</div>}
       </div>
 
+      {!!metricsInsights && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <div className="text-sm font-semibold">ST stable (last 5)</div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+              Date: {metricsInsights?.for_date}
+            </div>
+            <div className="mt-2 text-sm">
+              {(metricsInsights?.stable_st_5 || []).slice(0, 20).map((x: any) => (
+                <div key={x.symbol} className="flex items-center justify-between border-b dark:border-gray-700 py-1 last:border-b-0">
+                  <span>{x.symbol}</span>
+                  <span className={x.st ? 'text-green-600' : 'text-gray-500'}>{x.st ? 'UP' : 'DOWN'}</span>
+                </div>
+              ))}
+              {(!metricsInsights?.stable_st_5 || metricsInsights.stable_st_5.length === 0) && (
+                <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <div className="text-sm font-semibold">Close above E21/E50/E100</div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+              Date: {metricsInsights?.for_date}
+            </div>
+            <div className="mt-2 text-sm">
+              {(metricsInsights?.above_all_emas || []).slice(0, 20).map((x: any) => (
+                <div key={x.symbol} className="border-b dark:border-gray-700 py-1 last:border-b-0">{x.symbol}</div>
+              ))}
+              {(!metricsInsights?.above_all_emas || metricsInsights.above_all_emas.length === 0) && (
+                <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+            <div className="text-sm font-semibold">Score upgrades</div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+              {metricsInsights?.prev_date ? (
+                <>From {metricsInsights.prev_date} to {metricsInsights.for_date}</>
+              ) : (
+                <>Date: {metricsInsights?.for_date}</>
+              )}
+            </div>
+            <div className="mt-2 text-sm">
+              {(metricsInsights?.score_upgrades || []).slice(0, 20).map((x: any) => (
+                <div key={x.symbol} className="flex items-center justify-between border-b dark:border-gray-700 py-1 last:border-b-0">
+                  <span>{x.symbol}</span>
+                  <span className="text-green-600">{x.from}→{x.to}</span>
+                </div>
+              ))}
+              {(!metricsInsights?.score_upgrades || metricsInsights.score_upgrades.length === 0) && (
+                <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {isAdmin && formOpen && (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
           <div className="flex items-center justify-between mb-3">
@@ -669,19 +731,16 @@ export default function IpoTracker() {
             <span>Age &lt; 1 year</span>
           </label>
 
-          <div className="md:col-span-2">
+          <div>
             <div className="text-xs text-gray-600 dark:text-gray-400 mb-1">Year (listing)</div>
             <select
-              multiple
               className="w-full border dark:border-gray-700 dark:bg-gray-900 rounded px-3 py-2 text-sm"
-              value={filterYears.map(String)}
-              onChange={(e) => {
-                const opts = Array.from(e.target.selectedOptions).map(o => Number(o.value)).filter(Boolean)
-                setFilterYears(opts)
-              }}
+              value={filterYear}
+              onChange={(e) => setFilterYear(e.target.value)}
             >
+              <option value="">Any</option>
               {yearOptions.map(y => (
-                <option key={y} value={y}>{y}</option>
+                <option key={y} value={String(y)}>{y}</option>
               ))}
             </select>
           </div>

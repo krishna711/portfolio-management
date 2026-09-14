@@ -97,6 +97,121 @@ def _age_str(listing_date: Optional[datetime.date], today: Optional[datetime.dat
     return f"{rem}m"
 
 
+def _score_for_metrics(ipo: IPO, m: IpoDailyMetrics) -> Optional[int]:
+    if m is None or m.close is None:
+        return None
+    try:
+        close = float(m.close)
+    except Exception:
+        return None
+
+    st = bool(m.supertrend_10_3_up is True)
+    e21 = bool(m.above_ema21 is True)
+    e50 = bool(m.above_ema50 is True)
+    e100 = bool(m.above_ema100 is True)
+
+    above_listing = False
+    if ipo.listing_price is not None:
+        try:
+            above_listing = close >= float(ipo.listing_price)
+        except Exception:
+            above_listing = False
+
+    above_ipo = False
+    if ipo.ipo_price is not None:
+        try:
+            above_ipo = close >= float(ipo.ipo_price)
+        except Exception:
+            above_ipo = False
+
+    return (1 if st else 0) + (1 if e21 else 0) + (1 if e50 else 0) + (1 if e100 else 0) + (1 if above_listing else 0) + (1 if above_ipo else 0)
+
+
+def _metrics_insights(session: Session, for_date: datetime.date) -> dict:
+    # Determine previous available metrics date
+    prev_row = session.exec(
+        select(IpoDailyMetrics.for_date).where(IpoDailyMetrics.for_date < for_date).order_by(IpoDailyMetrics.for_date.desc())
+    ).first()
+    prev_date = prev_row if isinstance(prev_row, datetime.date) else None
+
+    dates = [for_date]
+    if prev_date:
+        dates.append(prev_date)
+
+    # For stable ST: last 5 available dates overall
+    last5_dates = session.exec(select(IpoDailyMetrics.for_date).distinct().order_by(IpoDailyMetrics.for_date.desc()).limit(5)).all()
+    last5_dates = [d for d in last5_dates if isinstance(d, datetime.date)]
+
+    # Fetch metrics for required dates
+    need_dates = list(dict.fromkeys(last5_dates + dates))
+    metrics = session.exec(select(IpoDailyMetrics).where(IpoDailyMetrics.for_date.in_(need_dates))).all() if need_dates else []
+
+    by_sym: dict[str, list[IpoDailyMetrics]] = {}
+    for m in metrics:
+        if not m.symbol:
+            continue
+        by_sym.setdefault(str(m.symbol).strip().upper(), []).append(m)
+
+    for sym in by_sym:
+        by_sym[sym].sort(key=lambda x: x.for_date, reverse=True)
+
+    ipos = session.exec(select(IPO)).all()
+    ipo_by_sym = {str(i.symbol).strip().upper(): i for i in ipos if i.symbol}
+
+    # 1) ST stable for last 5 entries (available)
+    stable = []
+    for sym, rows in by_sym.items():
+        seq = [r.supertrend_10_3_up for r in rows if r.for_date in last5_dates]
+        seq = [x for x in seq if x is not None]
+        if len(seq) < 5:
+            continue
+        if all(x == seq[0] for x in seq[:5]):
+            ipo = ipo_by_sym.get(sym)
+            stable.append({"symbol": sym, "name": (ipo.name if ipo else sym), "st": bool(seq[0])})
+
+    # 2) Close above all EMAs today
+    above_all = []
+    for sym, rows in by_sym.items():
+        m0 = next((r for r in rows if r.for_date == for_date), None)
+        if not m0:
+            continue
+        if m0.above_ema21 is True and m0.above_ema50 is True and m0.above_ema100 is True:
+            ipo = ipo_by_sym.get(sym)
+            above_all.append({"symbol": sym, "name": (ipo.name if ipo else sym)})
+
+    # 3) Score upgrades (only 4->5,4->6,5->6)
+    upgrades = []
+    if prev_date:
+        for sym, rows in by_sym.items():
+            cur = next((r for r in rows if r.for_date == for_date), None)
+            prev = next((r for r in rows if r.for_date == prev_date), None)
+            if not cur or not prev:
+                continue
+            ipo = ipo_by_sym.get(sym)
+            if not ipo:
+                continue
+            sc0 = _score_for_metrics(ipo, prev)
+            sc1 = _score_for_metrics(ipo, cur)
+            if sc0 is None or sc1 is None:
+                continue
+            if sc1 <= sc0:
+                continue
+            if (sc0, sc1) in ((4, 5), (4, 6), (5, 6)):
+                upgrades.append({"symbol": sym, "name": ipo.name, "from": sc0, "to": sc1})
+
+    stable.sort(key=lambda x: (x.get("st") is False, x.get("symbol")))
+    above_all.sort(key=lambda x: x.get("symbol"))
+    upgrades.sort(key=lambda x: (x.get("from"), x.get("to"), x.get("symbol")))
+
+    return {
+        "for_date": str(for_date),
+        "prev_date": str(prev_date) if prev_date else None,
+        "stable_st_5": stable,
+        "above_all_emas": above_all,
+        "score_upgrades": upgrades,
+    }
+
+
 def refresh_ipo_daily_metrics(session: Session, for_date: Optional[datetime.date] = None) -> dict:
     now_ist = _ist_now()
     for_date = for_date or now_ist.date()
@@ -157,7 +272,9 @@ def refresh_ipo_daily_metrics(session: Session, for_date: Optional[datetime.date
         except Exception:
             continue
 
-    return {"ok": True, "for_date": str(for_date), "symbols": len(symbols), "updated": done}
+    resp = {"ok": True, "for_date": str(for_date), "symbols": len(symbols), "updated": done}
+    resp["insights"] = _metrics_insights(session, for_date)
+    return resp
 
 
 @router.get("/")
