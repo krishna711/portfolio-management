@@ -195,6 +195,16 @@ class IpoDailyMetrics(SQLModel, table=True):
     computed_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, nullable=False)
 
 
+class IpoHourlyMetrics(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("symbol", "for_hour", name="uix_ipohourly_symbol_hour"),)
+    id: Optional[int] = Field(default=None, primary_key=True)
+    symbol: str = Field(index=True)
+    for_hour: datetime.datetime = Field(index=True)
+    close: Optional[float] = None
+    supertrend_up: Optional[bool] = None
+    computed_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, nullable=False)
+
+
 class IpoUserTag(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("user_id", "ipo_id", name="uix_ipotag_user_ipo"),)
     id: Optional[int] = Field(default=None, primary_key=True)

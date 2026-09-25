@@ -431,6 +431,83 @@ def _yahoo_chart_ohlc(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
     return None
 
 
+def _yahoo_chart_intraday_ohlc(symbol: str, rng: str = '1mo', interval: str = '60m') -> Optional[pd.DataFrame]:
+    hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
+    for host in hosts:
+        try:
+            url = f"https://{host}/v8/finance/chart/{symbol}"
+            params = {"range": rng, "interval": interval, "region": "IN", "lang": "en-IN", "includePrePost": "false"}
+            headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+            r = requests.get(url, params=params, headers=headers, timeout=8)
+            r.raise_for_status()
+            js = r.json()
+            res = (js or {}).get("chart", {}).get("result", [])
+            if not res:
+                continue
+            node = res[0]
+            tz_name = (node.get("meta") or {}).get("exchangeTimezoneName") or "UTC"
+            ts = node.get("timestamp", [])
+            q = node.get("indicators", {}).get("quote", [{}])[0]
+            opens = q.get("open", [])
+            highs = q.get("high", [])
+            lows = q.get("low", [])
+            closes = q.get("close", [])
+            volumes = q.get("volume", [])
+            if not ts or not closes:
+                continue
+            idx = pd.to_datetime(ts, unit='s', utc=True).tz_convert(tz_name).tz_localize(None)
+            df = pd.DataFrame({
+                'open': pd.Series(opens, index=idx, dtype='float64'),
+                'high': pd.Series(highs, index=idx, dtype='float64'),
+                'low': pd.Series(lows, index=idx, dtype='float64'),
+                'close': pd.Series(closes, index=idx, dtype='float64'),
+                'volume': pd.Series(volumes, index=idx, dtype='float64') if volumes else pd.Series(index=idx, dtype='float64'),
+            }).dropna()
+            return df
+        except Exception:
+            continue
+    return None
+
+
+def get_ohlc_intraday(symbol: str, rng: str = '1mo', interval: str = '60m') -> Optional[pd.DataFrame]:
+    key = f"ohlc_i:{symbol}:{rng}:{interval}"
+    cached = _get_ohlc_cache(key)
+    if cached is not None and not cached.empty:
+        return cached.copy()
+    df = None
+    for cand in _merged_candidates(symbol):
+        # 1) Yahoo chart API
+        df = _yahoo_chart_intraday_ohlc(cand, rng=rng, interval=interval)
+        if df is not None and not df.empty:
+            break
+        # 2) yfinance fallback (helps *.BO listings)
+        if str(cand).upper().endswith('.BO'):
+            try:
+                yf_df = yf.download(cand, period=rng, interval=interval, auto_adjust=False, progress=False, threads=False)
+                if yf_df is not None and not yf_df.empty:
+                    cols = {str(c).lower(): c for c in yf_df.columns}
+                    if all(k in cols for k in ['open', 'high', 'low', 'close']):
+                        df = pd.DataFrame({
+                            'open': yf_df[cols['open']].astype(float),
+                            'high': yf_df[cols['high']].astype(float),
+                            'low': yf_df[cols['low']].astype(float),
+                            'close': yf_df[cols['close']].astype(float),
+                            'volume': yf_df[cols['volume']].astype(float) if cols.get('volume') else pd.Series(index=yf_df.index, dtype='float64'),
+                        })
+                        idx = pd.to_datetime(yf_df.index)
+                        if getattr(idx, 'tz', None) is not None:
+                            idx = idx.tz_convert('Asia/Kolkata').tz_localize(None)
+                        df.index = idx
+                        break
+            except Exception:
+                pass
+    if df is None or df.empty:
+        return None
+    df = df[~df.index.duplicated(keep='last')].sort_index()
+    _set_ohlc_cache(key, df)
+    return df
+
+
 def _openchart_ohlc(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
     nse = _ensure_openchart()
     if not nse:

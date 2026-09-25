@@ -60,7 +60,9 @@ type IpoRow = {
 
 type IpoMetricsAlerts = {
   as_of: string | null
+  as_of_hourly: string | null
   st_same_5d: { symbol: string; name: string; st_up: boolean; dates: string[]; is_new?: boolean }[]
+  st_same_5h: { symbol: string; name: string; st_up: boolean; dates: string[]; is_new?: boolean }[]
   above_ema: {
     date: string | null
     all: { symbol: string; name: string; is_new?: boolean }[]
@@ -153,6 +155,53 @@ export default function IpoTracker() {
   const scoreForSymbol = (sym: string) => {
     const r = rowBySymbol.get((sym || '').trim().toUpperCase())
     return r ? scoreFor(r).score : null
+  }
+
+  const renderStAlertList = (items?: { symbol: string; name: string; st_up: boolean; is_new?: boolean }[]) => {
+    const upSyms = (items || [])
+      .filter(x => x.st_up)
+      .slice(0, 120)
+      .map(x => String(x.symbol || '').trim().toUpperCase())
+      .filter(Boolean)
+    if (!upSyms.length) return <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+
+    const emaSet = new Set(
+      (alerts?.above_ema?.all || [])
+        .map(x => String(x.symbol || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
+
+    const newSet = new Set(
+      (items || [])
+        .filter(x => x.st_up && x.is_new)
+        .map(x => String(x.symbol || '').trim().toUpperCase())
+        .filter(Boolean)
+    )
+
+    const sorted = [...upSyms].sort((a, b) => {
+      const sa = scoreForSymbol(a)
+      const sb = scoreForSymbol(b)
+      const da = sa === null ? -1 : sa
+      const db = sb === null ? -1 : sb
+      if (db !== da) return db - da
+      return a.localeCompare(b)
+    })
+
+    return (
+      <div className="text-xs font-mono whitespace-normal break-words text-emerald-700 dark:text-emerald-300">
+        {sorted.map((sym, i) => {
+          const sc = scoreForSymbol(sym)
+          const base = sc === null ? sym : `${sym}(${sc})`
+          const txt = emaSet.has(sym) ? `${base}✓` : base
+          const isNew = newSet.has(sym)
+          return (
+            <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
+              {i ? ', ' : ''}{txt}
+            </span>
+          )
+        })}
+      </div>
+    )
   }
 
   const loadPrefs = async () => {
@@ -703,56 +752,18 @@ export default function IpoTracker() {
                 {alertsLoading ? (
                   <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
                 ) : (
-                  <div className="space-y-1">
-                    <div className="pr-1">
-                      {(() => {
-                        const upSyms = (alerts?.st_same_5d || [])
-                          .filter(x => x.st_up)
-                          .slice(0, 120)
-                          .map(x => String(x.symbol || '').trim().toUpperCase())
-                          .filter(Boolean)
-                        if (!upSyms.length) return <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+                  <div className="pr-1">{renderStAlertList(alerts?.st_same_5d)}</div>
+                )}
+              </div>
 
-                        const emaSet = new Set(
-                          (alerts?.above_ema?.all || [])
-                            .map(x => String(x.symbol || '').trim().toUpperCase())
-                            .filter(Boolean)
-                        )
-
-                        const newSet = new Set(
-                          (alerts?.st_same_5d || [])
-                            .filter(x => x.st_up && x.is_new)
-                            .map(x => String(x.symbol || '').trim().toUpperCase())
-                            .filter(Boolean)
-                        )
-
-                        const sorted = [...upSyms].sort((a, b) => {
-                          const sa = scoreForSymbol(a)
-                          const sb = scoreForSymbol(b)
-                          const da = sa === null ? -1 : sa
-                          const db = sb === null ? -1 : sb
-                          if (db !== da) return db - da
-                          return a.localeCompare(b)
-                        })
-
-                        return (
-                          <div className="text-xs font-mono whitespace-normal break-words text-emerald-700 dark:text-emerald-300">
-                            {sorted.map((sym, i) => {
-                              const sc = scoreForSymbol(sym)
-                              const base = sc === null ? sym : `${sym}(${sc})`
-                              const txt = emaSet.has(sym) ? `${base}✓` : base
-                              const isNew = newSet.has(sym)
-                              return (
-                                <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
-                                  {i ? ', ' : ''}{txt}
-                                </span>
-                              )
-                            })}
-                          </div>
-                        )
-                      })()}
-                    </div>
-                  </div>
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                  ST same (last 5 hours) · {alerts?.st_same_5h?.length || 0} matches{alerts?.as_of_hourly ? ` · as of ${alerts.as_of_hourly}` : ''}
+                </div>
+                {alertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="pr-1">{renderStAlertList(alerts?.st_same_5h)}</div>
                 )}
               </div>
 

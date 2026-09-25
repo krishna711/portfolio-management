@@ -54,6 +54,24 @@ def _next_run_at(target_time: dtime, now: datetime | None = None) -> datetime:
     return candidate
 
 
+def _next_ipo_hourly_run(now: datetime) -> datetime:
+    tz = ZoneInfo("Asia/Kolkata")
+    start = datetime.combine(now.date(), dtime(9, 15), tzinfo=tz)
+    end = datetime.combine(now.date(), dtime(15, 15), tzinfo=tz)
+    if now.weekday() < 5:
+        cand = now.replace(minute=15, second=0, microsecond=0)
+        if cand <= now:
+            cand = cand + timedelta(hours=1)
+        if cand < start:
+            cand = start
+        if cand <= end:
+            return cand
+    d = now.date() + timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d + timedelta(days=1)
+    return datetime.combine(d, dtime(9, 15), tzinfo=tz)
+
+
 def _parse_hhmm(value: str, fallback: dtime) -> dtime:
     try:
         parts = str(value).strip().split(":")
@@ -108,6 +126,17 @@ def _run_ipo_metrics_snapshot() -> None:
         _log.exception("scheduler: ipo metrics run failed")
 
 
+def _run_ipo_hourly_metrics_snapshot() -> None:
+    try:
+        with SQLSession(engine) as s:
+            try:
+                ipos.refresh_ipo_hourly_metrics(s)
+            except Exception:
+                _log.exception("scheduler: ipo hourly metrics refresh failed")
+    except Exception:
+        _log.exception("scheduler: ipo hourly metrics run failed")
+
+
 def _scheduler_loop(stop_event: threading.Event) -> None:
     dashboard_time = _parse_hhmm(settings.dashboard_warm_time, dtime(16, 5))
     scanners_time = _parse_hhmm(settings.scanners_warm_time, dtime(17, 5))
@@ -117,7 +146,8 @@ def _scheduler_loop(stop_event: threading.Event) -> None:
         next_dash = _next_run_at(dashboard_time, now)
         next_scan = _next_run_at(scanners_time, now)
         next_ipo = _next_run_at(ipo_time, now)
-        next_run = min(next_dash, next_scan, next_ipo)
+        next_ipo_hourly = _next_ipo_hourly_run(now)
+        next_run = min(next_dash, next_scan, next_ipo, next_ipo_hourly)
         sleep_s = max(1.0, (next_run - now).total_seconds())
         stop_event.wait(timeout=sleep_s)
         if stop_event.is_set():
@@ -129,6 +159,8 @@ def _scheduler_loop(stop_event: threading.Event) -> None:
             _run_scanners_snapshot()
         if abs((now2 - next_ipo).total_seconds()) < 90:
             _run_ipo_metrics_snapshot()
+        if abs((now2 - next_ipo_hourly).total_seconds()) < 90:
+            _run_ipo_hourly_metrics_snapshot()
 
 
 @app.on_event("startup")
