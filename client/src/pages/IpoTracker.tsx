@@ -60,8 +60,24 @@ type IpoRow = {
 
 type IpoMetricsAlerts = {
   as_of: string | null
-  as_of_hourly: string | null
+  computed_at: string | null
   st_same_5d: { symbol: string; name: string; st_up: boolean; dates: string[]; is_new?: boolean }[]
+  above_ema: {
+    date: string | null
+    all: { symbol: string; name: string; is_new?: boolean }[]
+    e21: { symbol: string; name: string }[]
+    e50: { symbol: string; name: string }[]
+    e100: { symbol: string; name: string }[]
+  }
+  score_upgrades: {
+    date: string | null
+    items: { symbol: string; name: string; from_score: number; to_score: number; prev_date: string; cur_date: string }[]
+  }
+}
+
+type IpoHourlyMetricsAlerts = {
+  as_of: string | null
+  computed_at: string | null
   st_same_5h: { symbol: string; name: string; st_up: boolean; dates: string[]; is_new?: boolean }[]
   above_ema: {
     date: string | null
@@ -86,6 +102,19 @@ function fmtInt(v: number | null | undefined) {
   if (v === null || v === undefined) return '-'
   if (typeof v !== 'number' || Number.isNaN(v)) return '-'
   return String(Math.round(v))
+}
+
+function fmtAsOf(iso: string | null | undefined) {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const ist = new Date(d.getTime() + (5 * 60 + 30) * 60 * 1000)
+  const y = ist.getUTCFullYear()
+  const m = String(ist.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(ist.getUTCDate()).padStart(2, '0')
+  const h = String(ist.getUTCHours()).padStart(2, '0')
+  const min = String(ist.getUTCMinutes()).padStart(2, '0')
+  return `as of ${y}-${m}-${dd} ${h}:${min}`
 }
 
 export default function IpoTracker() {
@@ -125,6 +154,10 @@ export default function IpoTracker() {
   const [alertsLoading, setAlertsLoading] = useState(false)
   const [alertsError, setAlertsError] = useState('')
 
+  const [hourlyAlerts, setHourlyAlerts] = useState<IpoHourlyMetricsAlerts | null>(null)
+  const [hourlyAlertsLoading, setHourlyAlertsLoading] = useState(false)
+  const [hourlyAlertsError, setHourlyAlertsError] = useState('')
+
   const [name, setName] = useState('')
   const [symbol, setSymbol] = useState('')
   const [bseSymbol, setBseSymbol] = useState('')
@@ -155,53 +188,6 @@ export default function IpoTracker() {
   const scoreForSymbol = (sym: string) => {
     const r = rowBySymbol.get((sym || '').trim().toUpperCase())
     return r ? scoreFor(r).score : null
-  }
-
-  const renderStAlertList = (items?: { symbol: string; name: string; st_up: boolean; is_new?: boolean }[]) => {
-    const upSyms = (items || [])
-      .filter(x => x.st_up)
-      .slice(0, 120)
-      .map(x => String(x.symbol || '').trim().toUpperCase())
-      .filter(Boolean)
-    if (!upSyms.length) return <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
-
-    const emaSet = new Set(
-      (alerts?.above_ema?.all || [])
-        .map(x => String(x.symbol || '').trim().toUpperCase())
-        .filter(Boolean)
-    )
-
-    const newSet = new Set(
-      (items || [])
-        .filter(x => x.st_up && x.is_new)
-        .map(x => String(x.symbol || '').trim().toUpperCase())
-        .filter(Boolean)
-    )
-
-    const sorted = [...upSyms].sort((a, b) => {
-      const sa = scoreForSymbol(a)
-      const sb = scoreForSymbol(b)
-      const da = sa === null ? -1 : sa
-      const db = sb === null ? -1 : sb
-      if (db !== da) return db - da
-      return a.localeCompare(b)
-    })
-
-    return (
-      <div className="text-xs font-mono whitespace-normal break-words text-emerald-700 dark:text-emerald-300">
-        {sorted.map((sym, i) => {
-          const sc = scoreForSymbol(sym)
-          const base = sc === null ? sym : `${sym}(${sc})`
-          const txt = emaSet.has(sym) ? `${base}✓` : base
-          const isNew = newSet.has(sym)
-          return (
-            <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
-              {i ? ', ' : ''}{txt}
-            </span>
-          )
-        })}
-      </div>
-    )
   }
 
   const loadPrefs = async () => {
@@ -267,6 +253,22 @@ export default function IpoTracker() {
     }
   }
 
+  const loadAlertsHourly = async () => {
+    if (!isAdmin) return
+    setHourlyAlertsLoading(true)
+    setHourlyAlertsError('')
+    try {
+      const res = await api.get('/ipos/metrics/alerts/hourly')
+      setHourlyAlerts(res?.data || null)
+    } catch (e: any) {
+      console.error('Failed to load IPO hourly metrics alerts', e)
+      setHourlyAlerts(null)
+      setHourlyAlertsError('Failed to load hourly metrics alerts')
+    } finally {
+      setHourlyAlertsLoading(false)
+    }
+  }
+
   const runMetricsNow = async () => {
     if (!isAdmin) return
     setMetricsRunning(true)
@@ -277,6 +279,22 @@ export default function IpoTracker() {
       await load()
     } catch (e: any) {
       const msg = e?.response?.data?.detail || 'Failed to run metrics'
+      setError(String(msg))
+    } finally {
+      setMetricsRunning(false)
+    }
+  }
+
+  const runHourlyMetricsNow = async () => {
+    if (!isAdmin) return
+    setMetricsRunning(true)
+    setError('')
+    try {
+      await api.post('/ipos/metrics/run/hourly')
+      await loadAlertsHourly()
+      await load()
+    } catch (e: any) {
+      const msg = e?.response?.data?.detail || 'Failed to run hourly metrics'
       setError(String(msg))
     } finally {
       setMetricsRunning(false)
@@ -305,7 +323,7 @@ export default function IpoTracker() {
   }
 
   useEffect(() => { void loadPrefs(); void load() }, [])
-  useEffect(() => { if (isAdmin) void loadAlerts() }, [isAdmin])
+  useEffect(() => { if (isAdmin) { void loadAlerts(); void loadAlertsHourly() } }, [isAdmin])
 
   const yearOptions = useMemo(() => {
     const cur = new Date().getFullYear()
@@ -710,6 +728,15 @@ export default function IpoTracker() {
                 {metricsRunning ? 'Running...' : 'Run Metrics Now'}
               </button>
             )}
+            {isAdmin && (
+              <button
+                className="text-sm border dark:border-gray-700 dark:text-gray-100 px-3 py-1.5 rounded"
+                disabled={metricsRunning}
+                onClick={() => void runHourlyMetricsNow()}
+              >
+                {metricsRunning ? 'Running...' : 'Run Hourly Metrics'}
+              </button>
+            )}
             <button
               className="text-sm border dark:border-gray-700 dark:text-gray-100 px-3 py-1.5 rounded"
               disabled={priceUpdating}
@@ -721,7 +748,7 @@ export default function IpoTracker() {
               className="text-sm border dark:border-gray-700 dark:text-gray-100 px-3 py-1.5 rounded"
               onClick={() => {
                 void load()
-                if (isAdmin) void loadAlerts()
+                if (isAdmin) { void loadAlerts(); void loadAlertsHourly() }
               }}
             >
               Refresh
@@ -748,27 +775,65 @@ export default function IpoTracker() {
             <div className="text-sm font-semibold mb-2 dark:text-gray-100">Metrics Alerts</div>
             <div className="grid grid-cols-1 gap-3 items-start">
               <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
-                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">ST same (last 5 days) · {alerts?.st_same_5d?.length || 0} matches</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">ST same (last 5 days) · {alerts?.st_same_5d?.length || 0} matches · {fmtAsOf(alerts?.computed_at)}</div>
                 {alertsLoading ? (
                   <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
                 ) : (
-                  <div className="pr-1">{renderStAlertList(alerts?.st_same_5d)}</div>
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {(() => {
+                        const upSyms = (alerts?.st_same_5d || [])
+                          .filter(x => x.st_up)
+                          .slice(0, 120)
+                          .map(x => String(x.symbol || '').trim().toUpperCase())
+                          .filter(Boolean)
+                        if (!upSyms.length) return <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+
+                        const emaSet = new Set(
+                          (alerts?.above_ema?.all || [])
+                            .map(x => String(x.symbol || '').trim().toUpperCase())
+                            .filter(Boolean)
+                        )
+
+                        const newSet = new Set(
+                          (alerts?.st_same_5d || [])
+                            .filter(x => x.st_up && x.is_new)
+                            .map(x => String(x.symbol || '').trim().toUpperCase())
+                            .filter(Boolean)
+                        )
+
+                        const sorted = [...upSyms].sort((a, b) => {
+                          const sa = scoreForSymbol(a)
+                          const sb = scoreForSymbol(b)
+                          const da = sa === null ? -1 : sa
+                          const db = sb === null ? -1 : sb
+                          if (db !== da) return db - da
+                          return a.localeCompare(b)
+                        })
+
+                        return (
+                          <div className="text-xs font-mono whitespace-normal break-words text-emerald-700 dark:text-emerald-300">
+                            {sorted.map((sym, i) => {
+                              const sc = scoreForSymbol(sym)
+                              const base = sc === null ? sym : `${sym}(${sc})`
+                              const txt = emaSet.has(sym) ? `${base}✓` : base
+                              const isNew = newSet.has(sym)
+                              return (
+                                <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
+                                  {i ? ', ' : ''}{txt}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        )
+                      })()}
+                    </div>
+                  </div>
                 )}
               </div>
 
               <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
-                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
-                  ST same (last 5 hours) · {alerts?.st_same_5h?.length || 0} matches{alerts?.as_of_hourly ? ` · as of ${alerts.as_of_hourly}` : ''}
-                </div>
-                {alertsLoading ? (
-                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
-                ) : (
-                  <div className="pr-1">{renderStAlertList(alerts?.st_same_5h)}</div>
-                )}
-              </div>
-
-              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
-                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Close above EMAs (All 3) · All 3: {alerts?.above_ema?.all?.length || 0} | E21: {alerts?.above_ema?.e21?.length || 0} | E50: {alerts?.above_ema?.e50?.length || 0} | E100: {alerts?.above_ema?.e100?.length || 0}</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Close above EMAs (All 3) · All 3: {alerts?.above_ema?.all?.length || 0} | E21: {alerts?.above_ema?.e21?.length || 0} | E50: {alerts?.above_ema?.e50?.length || 0} | E100: {alerts?.above_ema?.e100?.length || 0} · {fmtAsOf(alerts?.computed_at)}</div>
                 {alertsLoading ? (
                   <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
                 ) : (
@@ -831,7 +896,7 @@ export default function IpoTracker() {
               </div>
 
               <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
-                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Score upgrades · {alerts?.score_upgrades?.items?.length || 0}</div>
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Score upgrades · {alerts?.score_upgrades?.items?.length || 0} · {fmtAsOf(alerts?.computed_at)}</div>
                 {alertsLoading ? (
                   <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
                 ) : (
@@ -866,6 +931,170 @@ export default function IpoTracker() {
             </div>
 
             {alertsError && <div className="mt-2 text-sm text-red-600 dark:text-red-400">{alertsError}</div>}
+          </div>
+        )}
+
+        {isAdmin && (
+          <div className="mt-4">
+            <div className="text-sm font-semibold mb-2 dark:text-gray-100">Hourly Metrics Alerts</div>
+            <div className="grid grid-cols-1 gap-3 items-start">
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">ST same (last 5 hours) · {hourlyAlerts?.st_same_5h?.length || 0} matches · {fmtAsOf(hourlyAlerts?.computed_at)}</div>
+                {hourlyAlertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {(() => {
+                        const upSyms = (hourlyAlerts?.st_same_5h || [])
+                          .filter(x => x.st_up)
+                          .slice(0, 120)
+                          .map(x => String(x.symbol || '').trim().toUpperCase())
+                          .filter(Boolean)
+                        if (!upSyms.length) return <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+
+                        const emaSet = new Set(
+                          (hourlyAlerts?.above_ema?.all || [])
+                            .map(x => String(x.symbol || '').trim().toUpperCase())
+                            .filter(Boolean)
+                        )
+
+                        const newSet = new Set(
+                          (hourlyAlerts?.st_same_5h || [])
+                            .filter(x => x.st_up && x.is_new)
+                            .map(x => String(x.symbol || '').trim().toUpperCase())
+                            .filter(Boolean)
+                        )
+
+                        const sorted = [...upSyms].sort((a, b) => {
+                          const sa = scoreForSymbol(a)
+                          const sb = scoreForSymbol(b)
+                          const da = sa === null ? -1 : sa
+                          const db = sb === null ? -1 : sb
+                          if (db !== da) return db - da
+                          return a.localeCompare(b)
+                        })
+
+                        return (
+                          <div className="text-xs font-mono whitespace-normal break-words text-emerald-700 dark:text-emerald-300">
+                            {sorted.map((sym, i) => {
+                              const sc = scoreForSymbol(sym)
+                              const base = sc === null ? sym : `${sym}(${sc})`
+                              const txt = emaSet.has(sym) ? `${base}✓` : base
+                              const isNew = newSet.has(sym)
+                              return (
+                                <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
+                                  {i ? ', ' : ''}{txt}
+                                </span>
+                              )
+                            })}
+                          </div>
+                        )
+                      })()}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Close above EMAs (All 3) 5h · All 3: {hourlyAlerts?.above_ema?.all?.length || 0} | E21: {hourlyAlerts?.above_ema?.e21?.length || 0} | E50: {hourlyAlerts?.above_ema?.e50?.length || 0} | E100: {hourlyAlerts?.above_ema?.e100?.length || 0} · {fmtAsOf(hourlyAlerts?.computed_at)}</div>
+                {hourlyAlertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {!!hourlyAlerts?.above_ema?.all?.length ? (
+                        <div className="text-xs font-mono whitespace-normal break-words text-gray-900 dark:text-gray-100">
+                          {(() => {
+                            const stSet = new Set(
+                              (hourlyAlerts?.st_same_5h || [])
+                                .filter(x => x.st_up)
+                                .map(x => String(x.symbol || '').trim().toUpperCase())
+                                .filter(Boolean)
+                            )
+
+                            const newSet = new Set(
+                              (hourlyAlerts?.above_ema?.all || [])
+                                .filter(x => x.is_new)
+                                .map(x => String(x.symbol || '').trim().toUpperCase())
+                                .filter(Boolean)
+                            )
+
+                            const syms = (hourlyAlerts?.above_ema?.all || [])
+                              .slice(0, 200)
+                              .map(x => String(x.symbol || '').trim().toUpperCase())
+                              .filter(Boolean)
+
+                            const sorted = syms.sort((a, b) => {
+                              const sa = scoreForSymbol(a)
+                              const sb = scoreForSymbol(b)
+                              const da = sa === null ? -1 : sa
+                              const db = sb === null ? -1 : sb
+                              if (db !== da) return db - da
+                              return a.localeCompare(b)
+                            })
+
+                            return (
+                              <>
+                                {sorted.map((sym, i) => {
+                                  const sc = scoreForSymbol(sym)
+                                  const base = sc === null ? sym : `${sym}(${sc})`
+                                  const txt = stSet.has(sym) ? `${base}✓` : base
+                                  const isNew = newSet.has(sym)
+                                  return (
+                                    <span key={sym} className={isNew ? 'bg-yellow-200/50 dark:bg-yellow-400/20 rounded px-0.5' : ''}>
+                                      {i ? ', ' : ''}{txt}
+                                    </span>
+                                  )
+                                })}
+                              </>
+                            )
+                          })()}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border dark:border-gray-700 rounded p-3 bg-gray-50 dark:bg-gray-900/40">
+                <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">Score upgrades 5h · {hourlyAlerts?.score_upgrades?.items?.length || 0} · {fmtAsOf(hourlyAlerts?.computed_at)}</div>
+                {hourlyAlertsLoading ? (
+                  <div className="text-sm text-gray-600 dark:text-gray-400">Loading...</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="pr-1">
+                      {!!hourlyAlerts?.score_upgrades?.items?.length ? (
+                        <div className="text-xs font-mono whitespace-normal break-words text-gray-900 dark:text-gray-100">
+                          {(hourlyAlerts?.score_upgrades?.items || [])
+                            .slice(0, 120)
+                            .map(x => {
+                              const sym = String(x.symbol || '').trim().toUpperCase()
+                              const sc = scoreForSymbol(sym)
+                              const head = sc === null ? sym : `${sym}(${sc})`
+                              return { sym, sc, head, txt: `${head} ${x.from_score}→${x.to_score}` }
+                            })
+                            .sort((a, b) => {
+                              const da = a.sc === null ? -1 : a.sc
+                              const db = b.sc === null ? -1 : b.sc
+                              if (db !== da) return db - da
+                              return a.sym.localeCompare(b.sym)
+                            })
+                            .map(x => x.txt)
+                            .join(', ')}
+                        </div>
+                      ) : (
+                        <div className="text-sm text-gray-600 dark:text-gray-400">None</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {hourlyAlertsError && <div className="mt-2 text-sm text-red-600 dark:text-red-400">{hourlyAlertsError}</div>}
           </div>
         )}
 

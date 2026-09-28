@@ -54,22 +54,27 @@ def _next_run_at(target_time: dtime, now: datetime | None = None) -> datetime:
     return candidate
 
 
-def _next_ipo_hourly_run(now: datetime) -> datetime:
-    tz = ZoneInfo("Asia/Kolkata")
-    start = datetime.combine(now.date(), dtime(9, 15), tzinfo=tz)
-    end = datetime.combine(now.date(), dtime(15, 15), tzinfo=tz)
-    if now.weekday() < 5:
-        cand = now.replace(minute=15, second=0, microsecond=0)
-        if cand <= now:
-            cand = cand + timedelta(hours=1)
-        if cand < start:
-            cand = start
-        if cand <= end:
-            return cand
-    d = now.date() + timedelta(days=1)
-    while d.weekday() >= 5:
-        d = d + timedelta(days=1)
-    return datetime.combine(d, dtime(9, 15), tzinfo=tz)
+def _next_ipo_hourly_run(now: datetime | None = None) -> datetime:
+    """Next IPO metrics run at :15 past each hour during market hours (Mon-Fri 09:15-15:30 IST)."""
+    now = now or _ist_now()
+    market_open = dtime(9, 15)
+    market_close = dtime(15, 30)
+    candidate = now.replace(minute=15, second=0, microsecond=0)
+    if candidate < now:
+        candidate = candidate + timedelta(hours=1)
+    while True:
+        if candidate.weekday() >= 5:
+            candidate = datetime.combine(candidate.date() + timedelta(days=1), market_open, tzinfo=ZoneInfo("Asia/Kolkata"))
+            continue
+        t = candidate.time()
+        if t < market_open:
+            candidate = datetime.combine(candidate.date(), market_open, tzinfo=ZoneInfo("Asia/Kolkata"))
+            break
+        if t > market_close:
+            candidate = datetime.combine(candidate.date() + timedelta(days=1), market_open, tzinfo=ZoneInfo("Asia/Kolkata"))
+            continue
+        break
+    return candidate
 
 
 def _parse_hhmm(value: str, fallback: dtime) -> dtime:
@@ -140,14 +145,14 @@ def _run_ipo_hourly_metrics_snapshot() -> None:
 def _scheduler_loop(stop_event: threading.Event) -> None:
     dashboard_time = _parse_hhmm(settings.dashboard_warm_time, dtime(16, 5))
     scanners_time = _parse_hhmm(settings.scanners_warm_time, dtime(17, 5))
-    ipo_time = _parse_hhmm(getattr(settings, "ipo_metrics_warm_time", "16:30"), dtime(16, 30))
+    ipo_daily_time = _parse_hhmm(getattr(settings, "ipo_metrics_warm_time", "16:30"), dtime(16, 30))
     while not stop_event.is_set():
         now = _ist_now()
         next_dash = _next_run_at(dashboard_time, now)
         next_scan = _next_run_at(scanners_time, now)
-        next_ipo = _next_run_at(ipo_time, now)
+        next_ipo_daily = _next_run_at(ipo_daily_time, now)
         next_ipo_hourly = _next_ipo_hourly_run(now)
-        next_run = min(next_dash, next_scan, next_ipo, next_ipo_hourly)
+        next_run = min(next_dash, next_scan, next_ipo_daily, next_ipo_hourly)
         sleep_s = max(1.0, (next_run - now).total_seconds())
         stop_event.wait(timeout=sleep_s)
         if stop_event.is_set():
@@ -157,7 +162,7 @@ def _scheduler_loop(stop_event: threading.Event) -> None:
             _warm_dashboard_for_all_users()
         if abs((now2 - next_scan).total_seconds()) < 90:
             _run_scanners_snapshot()
-        if abs((now2 - next_ipo).total_seconds()) < 90:
+        if abs((now2 - next_ipo_daily).total_seconds()) < 90:
             _run_ipo_metrics_snapshot()
         if abs((now2 - next_ipo_hourly).total_seconds()) < 90:
             _run_ipo_hourly_metrics_snapshot()

@@ -200,8 +200,17 @@ class IpoHourlyMetrics(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     symbol: str = Field(index=True)
     for_hour: datetime.datetime = Field(index=True)
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
     close: Optional[float] = None
-    supertrend_up: Optional[bool] = None
+    ema21: Optional[float] = None
+    ema50: Optional[float] = None
+    ema100: Optional[float] = None
+    above_ema21: Optional[bool] = None
+    above_ema50: Optional[bool] = None
+    above_ema100: Optional[bool] = None
+    supertrend_10_3_up: Optional[bool] = None
     computed_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow, nullable=False)
 
 

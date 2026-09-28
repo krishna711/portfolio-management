@@ -5,6 +5,7 @@ from datetime import time as dtime
 from zoneinfo import ZoneInfo
 from typing import List, Optional
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -12,7 +13,7 @@ from sqlmodel import Session, select
 from ..db import get_session
 from ..models import IPO, IpoBoard, IpoListingOn, IpoDailyMetrics, IpoHourlyMetrics, IpoQuote, IpoUserTag, IpoRowColor
 from ..security import get_current_user, require_admin
-from ..services.prices import get_latest_and_prev_close, get_ohlc, get_ohlc_intraday, ema_series, supertrend_direction, supertrend_direction_series
+from ..services.prices import get_latest_and_prev_close, get_ohlc, ema_series, supertrend_direction, supertrend_direction_series
 
 
 router = APIRouter(prefix="/ipos", tags=["ipos"])
@@ -160,57 +161,67 @@ def refresh_ipo_daily_metrics(session: Session, for_date: Optional[datetime.date
     return {"ok": True, "for_date": str(for_date), "symbols": len(symbols), "updated": done}
 
 
-def refresh_ipo_hourly_metrics(session: Session) -> dict:
-    now_ist = _ist_now()
-    today_ist = now_ist.date()
-    cutoff = today_ist - datetime.timedelta(days=365)
+def _floor_hour_utc(dt: datetime.datetime) -> datetime.datetime:
+    return dt.replace(minute=0, second=0, microsecond=0)
 
-    ipos_ = session.exec(
-        select(IPO).where(
-            IPO.listing_date != None,  # noqa: E711
-            IPO.listing_date <= today_ist,
-            IPO.listing_date >= cutoff,
-        )
-    ).all()
+
+def refresh_ipo_hourly_metrics(session: Session, for_hour: Optional[datetime.datetime] = None) -> dict:
+    now_ist = _ist_now()
+    if not _is_market_hours_ist(now_ist):
+        return {"ok": True, "for_hour": None, "symbols": 0, "updated": 0, "skipped": True}
+
+    ipos_ = session.exec(select(IPO)).all()
     symbols = [str(i.symbol or "").strip().upper() for i in ipos_ if str(i.symbol or "").strip()]
     symbols = list(dict.fromkeys(symbols))
 
-    # Only use completed hourly bars (drop the in-progress bar for the current hour)
-    bar_floor = now_ist.replace(minute=0, second=0, microsecond=0).replace(tzinfo=None)
-
     done = 0
+    bucket: Optional[datetime.datetime] = None
     for sym in symbols:
         try:
-            df = get_ohlc_intraday(sym, rng='1mo', interval='60m')
+            df = get_ohlc(sym, days=60, interval="1h", append_live=False)
             if df is None or df.empty:
                 continue
-            df2 = df[['high', 'low', 'close']].dropna().copy()
-            df2 = df2[df2.index < bar_floor]
-            if df2.empty or len(df2) < 12:
+            df2 = df[['open', 'high', 'low', 'close']].dropna().copy()
+            # Keep only Indian market hour bars: 09:15-15:30 IST => 03:45-10:00 UTC
+            df2 = df2[(df2.index.hour >= 3) & (df2.index.hour <= 9)].copy()
+            if df2.empty or len(df2) < 100:
+                # Need at least 100 market-hour bars for EMA100
                 continue
 
-            s = supertrend_direction_series(df2, period=8, multiplier=3.2)
-            if s is None or s.empty:
-                continue
+            close = df2['close'].astype(float)
+            last_close = float(close.iloc[-1])
+            last_open = float(df2['open'].astype(float).iloc[-1])
+            last_high = float(df2['high'].astype(float).iloc[-1])
+            last_low = float(df2['low'].astype(float).iloc[-1])
+            last_ts = df2.index[-1]
+            if not isinstance(last_ts, datetime.datetime):
+                last_ts = pd.to_datetime(last_ts).to_pydatetime()  # type: ignore
+            bucket = _floor_hour_utc(last_ts)
+            if for_hour is not None:
+                bucket = for_hour
 
-            last_ts = s.index[-1]
-            if hasattr(last_ts, 'to_pydatetime'):
-                for_hour = last_ts.to_pydatetime()
-            else:
-                for_hour = datetime.datetime.fromisoformat(str(last_ts))
-            if getattr(for_hour, 'tzinfo', None) is not None:
-                for_hour = for_hour.replace(tzinfo=None)
-
-            st_up = bool(s.iloc[-1])
-            last_close = float(df2['close'].iloc[-1])
+            e21 = ema_series(close, 21).iloc[-1]
+            e50 = ema_series(close, 50).iloc[-1]
+            e100 = ema_series(close, 100).iloc[-1]
+            st_up = supertrend_direction(df2, period=8, multiplier=3.2)
 
             row = session.exec(
-                select(IpoHourlyMetrics).where(IpoHourlyMetrics.symbol == sym, IpoHourlyMetrics.for_hour == for_hour)
+                select(IpoHourlyMetrics).where(IpoHourlyMetrics.symbol == sym, IpoHourlyMetrics.for_hour == bucket)
             ).first()
             if not row:
-                row = IpoHourlyMetrics(symbol=sym, for_hour=for_hour)
+                row = IpoHourlyMetrics(symbol=sym, for_hour=bucket)
+
+            row.open = last_open
+            row.high = last_high
+            row.low = last_low
             row.close = last_close
-            row.supertrend_up = st_up
+            row.ema21 = float(e21) if e21 == e21 else None
+            row.ema50 = float(e50) if e50 == e50 else None
+            row.ema100 = float(e100) if e100 == e100 else None
+            row.above_ema21 = bool(last_close >= float(e21)) if e21 == e21 else None
+            row.above_ema50 = bool(last_close >= float(e50)) if e50 == e50 else None
+            row.above_ema100 = bool(last_close >= float(e100)) if e100 == e100 else None
+            row.supertrend_10_3_up = st_up
             row.computed_at = datetime.datetime.utcnow()
 
             session.add(row)
@@ -219,7 +230,7 @@ def refresh_ipo_hourly_metrics(session: Session) -> dict:
         except Exception:
             continue
 
-    return {"ok": True, "symbols": len(symbols), "updated": done, "as_of_hour": str(bar_floor)}
+    return {"ok": True, "for_hour": str(bucket) if bucket is not None else None, "symbols": len(symbols), "updated": done}
 
 
 @router.get("/")
@@ -344,12 +355,12 @@ class IpoColorUpdate(BaseModel):
 
 @router.post("/metrics/run")
 def run_metrics_now(session: Session = Depends(get_session), user=Depends(require_admin)):
-    res = refresh_ipo_daily_metrics(session)
-    try:
-        res["hourly"] = refresh_ipo_hourly_metrics(session)
-    except Exception:
-        res["hourly"] = {"ok": False}
-    return res
+    return refresh_ipo_daily_metrics(session)
+
+
+@router.post("/metrics/run/hourly")
+def run_hourly_metrics_now(session: Session = Depends(get_session), user=Depends(require_admin)):
+    return refresh_ipo_hourly_metrics(session)
 
 
 @router.get("/metrics/alerts")
@@ -371,83 +382,10 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
         .order_by(IpoDailyMetrics.for_date.desc())
     ).all()
 
-    def _hourly_st_same_5() -> tuple[list, Optional[str]]:
-        out: list = []
-        as_of_hour: Optional[str] = None
-        try:
-            cutoff = today_ist - datetime.timedelta(days=365)
-            hourly_syms = {
-                (i.symbol or "").strip().upper()
-                for i in ipos_
-                if str(i.symbol or "").strip()
-                and i.listing_date is not None
-                and i.listing_date <= today_ist
-                and i.listing_date >= cutoff
-            }
-            h_window = now_ist.replace(tzinfo=None) - datetime.timedelta(days=10)
-            hrows = session.exec(
-                select(IpoHourlyMetrics)
-                .where(IpoHourlyMetrics.for_hour >= h_window)
-                .order_by(IpoHourlyMetrics.for_hour.desc())
-            ).all()
-
-            h_by_sym: dict[str, list[IpoHourlyMetrics]] = {}
-            for m in hrows:
-                sym = (m.symbol or "").strip().upper()
-                if not sym or sym not in hourly_syms:
-                    continue
-                h_by_sym.setdefault(sym, []).append(m)
-
-            for rows_ in h_by_sym.values():
-                rows_.sort(key=lambda x: (x.for_hour or datetime.datetime.min), reverse=True)
-
-            h_hours = sorted({m.for_hour for m in hrows if m.for_hour is not None}, reverse=True)
-            h_max = h_hours[0] if h_hours else None
-            h_prev = h_hours[1] if len(h_hours) > 1 else None
-            if h_max is None:
-                return [], None
-            as_of_hour = h_max.isoformat(sep=' ')[:16]
-
-            def _same5(sym: str, rows_: list[IpoHourlyMetrics], anchor: datetime.datetime):
-                xs = [r for r in rows_ if r.supertrend_up is not None and r.for_hour is not None and r.for_hour <= anchor]
-                if len(xs) < 5:
-                    return {"ok": False}
-                xs5 = xs[:5]
-                v0 = bool(xs5[0].supertrend_up)
-                if all(bool(r.supertrend_up) == v0 for r in xs5):
-                    return {"ok": True, "st_up": v0, "dates": [r.for_hour.isoformat(sep=' ')[:16] for r in xs5]}
-                return {"ok": False}
-
-            for sym, rows_ in h_by_sym.items():
-                res = _same5(sym, rows_, h_max)
-                if not res.get("ok"):
-                    continue
-                is_new = False
-                if h_prev is not None and bool(res.get("st_up")) is True:
-                    prev = _same5(sym, rows_, h_prev)
-                    was_up = bool(prev.get("ok")) and bool(prev.get("st_up")) is True
-                    is_new = not was_up
-                ipo = ipo_map.get(sym)
-                out.append({
-                    "symbol": sym,
-                    "name": (ipo.name if ipo else sym),
-                    "st_up": bool(res.get("st_up")),
-                    "dates": res.get("dates") or [],
-                    "is_new": bool(is_new),
-                })
-            out.sort(key=lambda x: x.get("symbol") or "")
-            return out, as_of_hour
-        except Exception:
-            return [], None
-
-    st_same_5h, as_of_hourly = _hourly_st_same_5()
-
     if not metrics_rows:
         return {
             "as_of": None,
-            "as_of_hourly": as_of_hourly,
             "st_same_5d": [],
-            "st_same_5h": st_same_5h,
             "above_ema": {"date": None, "all": [], "e21": [], "e50": [], "e100": []},
             "score_upgrades": {"date": None, "items": []},
         }
@@ -456,9 +394,7 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
     if not dates:
         return {
             "as_of": None,
-            "as_of_hourly": as_of_hourly,
             "st_same_5d": [],
-            "st_same_5h": st_same_5h,
             "above_ema": {"date": None, "all": [], "e21": [], "e50": [], "e100": []},
             "score_upgrades": {"date": None, "items": []},
         }
@@ -645,11 +581,16 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
 
     upgrades.sort(key=lambda x: (-(x.get("to_score") or 0), x.get("symbol") or ""))
 
+    latest_computed_at = None
+    for m in metrics_rows:
+        if m.computed_at is not None:
+            if latest_computed_at is None or m.computed_at > latest_computed_at:
+                latest_computed_at = m.computed_at
+
     return {
         "as_of": str(max_date),
-        "as_of_hourly": as_of_hourly,
+        "computed_at": latest_computed_at.isoformat() if latest_computed_at else None,
         "st_same_5d": st_same_5d,
-        "st_same_5h": st_same_5h,
         "above_ema": {
             "date": str(max_date),
             "all": above_all,
@@ -659,6 +600,182 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
         },
         "score_upgrades": {
             "date": str(max_date),
+            "items": upgrades,
+        },
+    }
+
+
+@router.get("/metrics/alerts/hourly")
+def ipo_metrics_alerts_hourly(session: Session = Depends(get_session), user=Depends(require_admin)):
+    now_ist = _ist_now()
+    window_start = now_ist - datetime.timedelta(days=7)
+
+    ipos_ = session.exec(select(IPO)).all()
+    ipo_map: dict[str, IPO] = {}
+    for r in ipos_:
+        sym = (r.symbol or "").strip().upper()
+        if sym:
+            ipo_map[sym] = r
+
+    metrics_rows = session.exec(
+        select(IpoHourlyMetrics)
+        .where(IpoHourlyMetrics.computed_at >= window_start)
+        .order_by(IpoHourlyMetrics.for_hour.desc())
+    ).all()
+
+    if not metrics_rows:
+        return {
+            "as_of": None,
+            "computed_at": None,
+            "st_same_5h": [],
+            "above_ema": {"date": None, "all": [], "e21": [], "e50": [], "e100": []},
+            "score_upgrades": {"date": None, "items": []},
+        }
+
+    by_sym: dict[str, list[IpoHourlyMetrics]] = {}
+    for m in metrics_rows:
+        sym = (m.symbol or "").strip().upper()
+        if not sym:
+            continue
+        by_sym.setdefault(sym, []).append(m)
+
+    for sym, rows in by_sym.items():
+        rows.sort(key=lambda x: (x.for_hour or datetime.datetime.min), reverse=True)
+
+    def _is_above(close: Optional[float], ema: Optional[float]) -> bool:
+        if close is None or ema is None:
+            return False
+        try:
+            return float(close) >= float(ema)
+        except Exception:
+            return False
+
+    st_same_5h = []
+    for sym, rows in by_sym.items():
+        valid = [r for r in rows if r.supertrend_10_3_up is not None]
+        if len(valid) < 5:
+            continue
+        last5 = valid[:5]
+        v0 = bool(last5[0].supertrend_10_3_up)
+        if not all(bool(r.supertrend_10_3_up) == v0 for r in last5):
+            continue
+        prev_up = False
+        if len(valid) >= 6:
+            prev_up = bool(valid[5].supertrend_10_3_up) is True
+        is_new = v0 is True and not prev_up
+        ipo = ipo_map.get(sym)
+        st_same_5h.append({
+            "symbol": sym,
+            "name": (ipo.name if ipo else sym),
+            "st_up": v0,
+            "dates": [str(r.for_hour) for r in last5 if r.for_hour],
+            "is_new": bool(is_new),
+        })
+
+    above_all = []
+    above_e21 = []
+    above_e50 = []
+    above_e100 = []
+
+    for sym in sorted(by_sym.keys()):
+        rows = by_sym.get(sym) or []
+        if not rows:
+            continue
+        latest = rows[0]
+        prev = rows[1] if len(rows) > 1 else None
+        ipo = ipo_map.get(sym)
+        name = (ipo.name if ipo else sym)
+
+        b21 = _is_above(latest.close, latest.ema21)
+        b50 = _is_above(latest.close, latest.ema50)
+        b100 = _is_above(latest.close, latest.ema100)
+
+        if b21:
+            above_e21.append({"symbol": sym, "name": name})
+        if b50:
+            above_e50.append({"symbol": sym, "name": name})
+        if b100:
+            above_e100.append({"symbol": sym, "name": name})
+        if b21 and b50 and b100:
+            prev_all = False
+            if prev is not None:
+                prev_all = (
+                    _is_above(prev.close, prev.ema21)
+                    and _is_above(prev.close, prev.ema50)
+                    and _is_above(prev.close, prev.ema100)
+                )
+            above_all.append({
+                "symbol": sym,
+                "name": name,
+                "is_new": not prev_all,
+            })
+
+    def score_for(m: IpoHourlyMetrics, ipo: Optional[IPO]) -> int:
+        st = bool(m.supertrend_10_3_up) if m.supertrend_10_3_up is not None else False
+        e21 = _is_above(m.close, m.ema21)
+        e50 = _is_above(m.close, m.ema50)
+        e100 = _is_above(m.close, m.ema100)
+        close = m.close
+
+        above_listing = False
+        above_ipo = False
+        if close is not None and ipo is not None:
+            if ipo.listing_price is not None:
+                above_listing = bool(close >= float(ipo.listing_price))
+            if ipo.ipo_price is not None:
+                above_ipo = bool(close >= float(ipo.ipo_price))
+
+        return (1 if st else 0) + (1 if e21 else 0) + (1 if e50 else 0) + (1 if e100 else 0) + (1 if above_listing else 0) + (1 if above_ipo else 0)
+
+    upgrades = []
+    allowed = {(4, 5), (4, 6), (5, 6)}
+
+    for sym, rows in by_sym.items():
+        if len(rows) < 2:
+            continue
+        latest = rows[0]
+        prev = rows[1]
+        if not latest.for_hour or not prev.for_hour:
+            continue
+
+        ipo = ipo_map.get(sym)
+        s0 = score_for(prev, ipo)
+        s1 = score_for(latest, ipo)
+        if (s0, s1) not in allowed:
+            continue
+
+        upgrades.append({
+            "symbol": sym,
+            "name": (ipo.name if ipo else sym),
+            "from_score": s0,
+            "to_score": s1,
+            "prev_date": str(prev.for_hour),
+            "cur_date": str(latest.for_hour),
+        })
+
+    upgrades.sort(key=lambda x: (-(x.get("to_score") or 0), x.get("symbol") or ""))
+
+    max_hour = None
+    latest_computed_at = None
+    for m in metrics_rows:
+        if m.for_hour is not None and (max_hour is None or m.for_hour > max_hour):
+            max_hour = m.for_hour
+        if m.computed_at is not None and (latest_computed_at is None or m.computed_at > latest_computed_at):
+            latest_computed_at = m.computed_at
+
+    return {
+        "as_of": str(max_hour) if max_hour else None,
+        "computed_at": latest_computed_at.isoformat() if latest_computed_at else None,
+        "st_same_5h": st_same_5h,
+        "above_ema": {
+            "date": str(max_hour) if max_hour else None,
+            "all": above_all,
+            "e21": above_e21,
+            "e50": above_e50,
+            "e100": above_e100,
+        },
+        "score_upgrades": {
+            "date": str(max_hour) if max_hour else None,
             "items": upgrades,
         },
     }
