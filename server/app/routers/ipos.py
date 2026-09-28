@@ -613,8 +613,12 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
 def ipo_metrics_alerts_hourly(session: Session = Depends(get_session), user=Depends(require_admin)):
     try:
         SQLModel.metadata.create_all(engine)
-    except Exception:
-        pass
+        return _ipo_metrics_alerts_hourly(session)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Hourly alerts failed: {e}") from e
+
+
+def _ipo_metrics_alerts_hourly(session: Session):
     now_ist = _ist_now()
     now_utc = datetime.datetime.utcnow()
     window_start = now_utc - datetime.timedelta(days=7)
