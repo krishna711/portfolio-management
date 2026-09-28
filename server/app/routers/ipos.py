@@ -608,7 +608,8 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
 @router.get("/metrics/alerts/hourly")
 def ipo_metrics_alerts_hourly(session: Session = Depends(get_session), user=Depends(require_admin)):
     now_ist = _ist_now()
-    window_start = now_ist - datetime.timedelta(days=7)
+    now_utc = datetime.datetime.utcnow()
+    window_start = now_utc - datetime.timedelta(days=7)
 
     ipos_ = session.exec(select(IPO)).all()
     ipo_map: dict[str, IPO] = {}
