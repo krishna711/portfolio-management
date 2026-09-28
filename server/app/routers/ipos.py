@@ -8,9 +8,9 @@ from typing import List, Optional
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, SQLModel, select
 
-from ..db import get_session
+from ..db import get_session, engine
 from ..models import IPO, IpoBoard, IpoListingOn, IpoDailyMetrics, IpoHourlyMetrics, IpoQuote, IpoUserTag, IpoRowColor
 from ..security import get_current_user, require_admin
 from ..services.prices import get_latest_and_prev_close, get_ohlc, ema_series, supertrend_direction, supertrend_direction_series
@@ -360,7 +360,11 @@ def run_metrics_now(session: Session = Depends(get_session), user=Depends(requir
 
 @router.post("/metrics/run/hourly")
 def run_hourly_metrics_now(session: Session = Depends(get_session), user=Depends(require_admin)):
-    return refresh_ipo_hourly_metrics(session)
+    try:
+        SQLModel.metadata.create_all(engine)
+        return refresh_ipo_hourly_metrics(session)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Hourly metrics run failed: {e}") from e
 
 
 @router.get("/metrics/alerts")
@@ -607,6 +611,10 @@ def ipo_metrics_alerts(session: Session = Depends(get_session), user=Depends(req
 
 @router.get("/metrics/alerts/hourly")
 def ipo_metrics_alerts_hourly(session: Session = Depends(get_session), user=Depends(require_admin)):
+    try:
+        SQLModel.metadata.create_all(engine)
+    except Exception:
+        pass
     now_ist = _ist_now()
     now_utc = datetime.datetime.utcnow()
     window_start = now_utc - datetime.timedelta(days=7)
