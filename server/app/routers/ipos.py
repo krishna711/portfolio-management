@@ -189,42 +189,67 @@ def refresh_ipo_hourly_metrics(session: Session, for_hour: Optional[datetime.dat
                 continue
 
             close = df2['close'].astype(float)
-            last_close = float(close.iloc[-1])
-            last_open = float(df2['open'].astype(float).iloc[-1])
-            last_high = float(df2['high'].astype(float).iloc[-1])
-            last_low = float(df2['low'].astype(float).iloc[-1])
-            last_ts = df2.index[-1]
-            if not isinstance(last_ts, datetime.datetime):
-                last_ts = pd.to_datetime(last_ts).to_pydatetime()  # type: ignore
-            bucket = _floor_hour_utc(last_ts)
-            if for_hour is not None:
-                bucket = for_hour
+            e21_s = ema_series(close, 21)
+            e50_s = ema_series(close, 50)
+            e100_s = ema_series(close, 100)
+            st_s = supertrend_direction_series(df2, period=8, multiplier=3.2)
+            if st_s is None or st_s.empty:
+                continue
 
-            e21 = ema_series(close, 21).iloc[-1]
-            e50 = ema_series(close, 50).iloc[-1]
-            e100 = ema_series(close, 100).iloc[-1]
-            st_up = supertrend_direction(df2, period=8, multiplier=3.2)
+            # Persist last N hourly bars per symbol so the 5-hour alert has
+            # enough history immediately instead of only accumulating 1 bar/run.
+            tail_idx = list(df2.index[-8:])
+            for ts in tail_idx:
+                try:
+                    ts_dt = ts if isinstance(ts, datetime.datetime) else pd.to_datetime(ts).to_pydatetime()  # type: ignore
+                    b = _floor_hour_utc(ts_dt)
+                    if for_hour is not None:
+                        b = for_hour
+                    if bucket is None or b > bucket:
+                        bucket = b
 
-            row = session.exec(
-                select(IpoHourlyMetrics).where(IpoHourlyMetrics.symbol == sym, IpoHourlyMetrics.for_hour == bucket)
-            ).first()
-            if not row:
-                row = IpoHourlyMetrics(symbol=sym, for_hour=bucket)
+                    c = float(df2.loc[ts, 'close'])
+                    o = float(df2.loc[ts, 'open'])
+                    h = float(df2.loc[ts, 'high'])
+                    l = float(df2.loc[ts, 'low'])
 
-            row.open = last_open
-            row.high = last_high
-            row.low = last_low
-            row.close = last_close
-            row.ema21 = float(e21) if e21 == e21 else None
-            row.ema50 = float(e50) if e50 == e50 else None
-            row.ema100 = float(e100) if e100 == e100 else None
-            row.above_ema21 = bool(last_close >= float(e21)) if e21 == e21 else None
-            row.above_ema50 = bool(last_close >= float(e50)) if e50 == e50 else None
-            row.above_ema100 = bool(last_close >= float(e100)) if e100 == e100 else None
-            row.supertrend_10_3_up = st_up
-            row.computed_at = datetime.datetime.utcnow()
+                    def _f(s: pd.Series) -> Optional[float]:
+                        try:
+                            v = s.loc[ts]
+                            return float(v) if v == v else None
+                        except Exception:
+                            return None
 
-            session.add(row)
+                    e21 = _f(e21_s)
+                    e50 = _f(e50_s)
+                    e100 = _f(e100_s)
+                    try:
+                        st_val = bool(st_s.loc[ts]) if ts in st_s.index else None
+                    except Exception:
+                        st_val = None
+
+                    row = session.exec(
+                        select(IpoHourlyMetrics).where(IpoHourlyMetrics.symbol == sym, IpoHourlyMetrics.for_hour == b)
+                    ).first()
+                    if not row:
+                        row = IpoHourlyMetrics(symbol=sym, for_hour=b)
+
+                    row.open = o
+                    row.high = h
+                    row.low = l
+                    row.close = c
+                    row.ema21 = e21
+                    row.ema50 = e50
+                    row.ema100 = e100
+                    row.above_ema21 = bool(c >= e21) if e21 is not None else None
+                    row.above_ema50 = bool(c >= e50) if e50 is not None else None
+                    row.above_ema100 = bool(c >= e100) if e100 is not None else None
+                    row.supertrend_10_3_up = st_val
+                    row.computed_at = datetime.datetime.utcnow()
+
+                    session.add(row)
+                except Exception:
+                    continue
             session.commit()
             done += 1
         except Exception:
