@@ -32,6 +32,18 @@ def init_db() -> None:
     ensure_column("transaction", "strategy_id", "strategy_id INTEGER")
     ensure_column("transaction", "notes", "notes TEXT")
 
+    # ipohourlymetrics: older deployments created it with only close/supertrend_up
+    ensure_column("ipohourlymetrics", "open", "open REAL")
+    ensure_column("ipohourlymetrics", "high", "high REAL")
+    ensure_column("ipohourlymetrics", "low", "low REAL")
+    ensure_column("ipohourlymetrics", "ema21", "ema21 REAL")
+    ensure_column("ipohourlymetrics", "ema50", "ema50 REAL")
+    ensure_column("ipohourlymetrics", "ema100", "ema100 REAL")
+    ensure_column("ipohourlymetrics", "above_ema21", "above_ema21 INTEGER")
+    ensure_column("ipohourlymetrics", "above_ema50", "above_ema50 INTEGER")
+    ensure_column("ipohourlymetrics", "above_ema100", "above_ema100 INTEGER")
+    ensure_column("ipohourlymetrics", "supertrend_10_3_up", "supertrend_10_3_up INTEGER")
+
     # Ensure default 'Swing' strategy exists per user and map any existing txns to it
     with Session(engine) as session:
         users = session.exec(select(User).order_by(User.id)).all()
