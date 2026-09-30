@@ -20,13 +20,9 @@ def _ensure_openchart():
         return _OC_NSE
     try:
         from openchart import NSEData  # type: ignore
-        nse = NSEData()
-        # Download master once
-        try:
-            nse.download()
-        except Exception:
-            pass
-        _OC_NSE = nse
+        # Latest openchart resolves symbols on-demand via search(); the old
+        # master-file download() (GetEQMasters/GetFOMasters) no longer exists.
+        _OC_NSE = NSEData()
     except Exception:
         _OC_NSE = None
     _OC_INIT = True
@@ -142,7 +138,7 @@ def _openchart_eod_series(symbol: str, days: int = 60) -> Optional[pd.Series]:
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=max(days, 2))
-        df = nse.historical(symbol=symbol, exchange='NSE', start=start_date, end=end_date, interval='1d')
+        df = nse.historical(symbol, segment='EQ', start=start_date, end=end_date, interval='1d')
         if df is None or df.empty:
             return None
         # Identify close column robustly
@@ -438,7 +434,7 @@ def _openchart_ohlc(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
     try:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=max(days, 2))
-        df = nse.historical(symbol=symbol, exchange='NSE', start=start_date, end=end_date, interval='1d')
+        df = nse.historical(symbol, segment='EQ', start=start_date, end=end_date, interval='1d')
         if df is None or df.empty:
             return None
         cols = {c.lower(): c for c in df.columns}
