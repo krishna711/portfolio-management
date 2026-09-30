@@ -6,8 +6,14 @@ from .models import User, Strategy, Account, Holding, Transaction, PasswordReset
 
 engine = create_engine(
     settings.database_url,
-    connect_args={"check_same_thread": False} if settings.database_url.startswith("sqlite") else {},
+    connect_args={"check_same_thread": False, "timeout": 30} if settings.database_url.startswith("sqlite") else {},
 )
+
+if settings.database_url.startswith("sqlite"):
+    # WAL allows concurrent readers during long writes (e.g. hourly metrics refresh)
+    with engine.begin() as _conn:
+        _conn.execute(text("PRAGMA journal_mode=WAL"))
+        _conn.execute(text("PRAGMA busy_timeout=30000"))
 
 
 def init_db() -> None:
